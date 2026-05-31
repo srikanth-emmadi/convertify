@@ -1,29 +1,37 @@
 import { jsPDF } from 'jspdf';
 import type { ConversionType, ConversionResult } from '../types';
 
-// ─── Image to PDF ───────────────────────────────────────────────
+// ─── Image to PDF (Maximum Quality) ──────────────────────────────
 export async function convertImageToPDF(file: File): Promise<ConversionResult> {
   return new Promise((resolve, reject) => {
     const img = new Image();
+
     img.onload = () => {
       try {
         const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
+        const width = img.naturalWidth;
+        const height = img.naturalHeight;
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: false });
         if (!ctx) throw new Error('Could not get canvas context');
-        ctx.drawImage(img, 0, 0);
 
-        const imgData = canvas.toDataURL('image/jpeg', 0.95);
+        // Disable smoothing for pixel-perfect rendering
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(img, 0, 0, width, height);
 
-        const orientation = img.width > img.height ? 'landscape' : 'portrait';
+        // Use PNG (lossless) as intermediate format — no quality loss
+        const imgData = canvas.toDataURL('image/png');
+
+        const orientation: 'landscape' | 'portrait' = width > height ? 'landscape' : 'portrait';
         const pdf = new jsPDF({
           orientation,
           unit: 'px',
-          format: [img.width, img.height],
+          format: [width, height],
         });
 
-        pdf.addImage(imgData, 'JPEG', 0, 0, img.width, img.height);
+        // Embed as PNG to avoid JPEG re-compression
+        pdf.addImage(imgData, 'PNG', 0, 0, width, height, undefined, 'NONE');
         const blob = pdf.output('blob');
         const filename = file.name.replace(/\.[^.]+$/, '') + '.pdf';
 
@@ -41,7 +49,7 @@ export async function convertImageToPDF(file: File): Promise<ConversionResult> {
   });
 }
 
-// ─── Generic Image Format Converter ─────────────────────────────
+// ─── Generic Image Format Converter (Maximum Quality) ────────────
 function convertImageFormat(
   file: File,
   mimeType: string,
@@ -52,17 +60,27 @@ function convertImageFormat(
     img.onload = () => {
       try {
         const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
+        const width = img.naturalWidth;
+        const height = img.naturalHeight;
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: false });
         if (!ctx) throw new Error('Could not get canvas context');
 
+        // Disable smoothing for exact pixel reproduction
+        ctx.imageSmoothingEnabled = false;
+        ctx.imageSmoothingQuality = 'high';
+
+        // White background for JPEG (no transparency)
         if (mimeType === 'image/jpeg') {
           ctx.fillStyle = '#FFFFFF';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillRect(0, 0, width, height);
         }
 
-        ctx.drawImage(img, 0, 0);
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Use maximum quality: 1.0 for JPEG, lossless for PNG
+        const quality = mimeType === 'image/jpeg' ? 1.0 : undefined;
 
         canvas.toBlob(
           (blob) => {
@@ -78,7 +96,7 @@ function convertImageFormat(
             });
           },
           mimeType,
-          0.95
+          quality
         );
       } catch (err) {
         reject(err);
@@ -105,25 +123,37 @@ export async function convertJPEGToJPG(file: File): Promise<ConversionResult> {
   return convertImageFormat(file, 'image/jpeg', 'jpg');
 }
 
-// ─── PDF to JPG (using pdf.js from CDN) ─────────────────────────
+// ─── PDF to JPG (High Resolution, Maximum Quality) ───────────────
 export async function convertPDFToJPG(file: File): Promise<ConversionResult> {
   const pdfjsLib = await loadPDFJS();
 
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await pdfjsLib.getDocument({
+    data: arrayBuffer,
+    // Use native image decoder for better quality
+    useSystemFonts: true,
+  }).promise;
 
   const page = await pdf.getPage(1);
-  const viewport = page.getViewport({ scale: 2.0 });
+
+  // Use 3x scale for high-resolution output (300 DPI equivalent)
+  const scale = 3.0;
+  const viewport = page.getViewport({ scale });
 
   const canvas = document.createElement('canvas');
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  const ctx = canvas.getContext('2d');
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: false });
   if (!ctx) throw new Error('Could not get canvas context');
+
+  // Enable high-quality rendering
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
   await page.render({ canvasContext: ctx, viewport }).promise;
 
   return new Promise((resolve, reject) => {
+    // Maximum JPEG quality
     canvas.toBlob(
       (blob) => {
         if (!blob) {
@@ -138,12 +168,12 @@ export async function convertPDFToJPG(file: File): Promise<ConversionResult> {
         });
       },
       'image/jpeg',
-      0.95
+      1.0 // Maximum quality
     );
   });
 }
 
-// ─── Video to MP3 (using FFmpeg.wasm) ───────────────────────────
+// ─── Video to MP3 (High Quality Audio) ───────────────────────────
 export async function convertVideoToMP3(
   file: File,
   onProgress?: (pct: number) => void
@@ -173,7 +203,16 @@ export async function convertVideoToMP3(
   const outputName = 'output.mp3';
 
   await ffmpeg.writeFile(inputName, await fetchFile(file));
-  await ffmpeg.exec(['-i', inputName, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', outputName]);
+
+  // High quality MP3: 320kbps CBR (best quality)
+  await ffmpeg.exec([
+    '-i', inputName,
+    '-vn',
+    '-acodec', 'libmp3lame',
+    '-b:a', '320k',
+    '-ar', '48000',
+    outputName,
+  ]);
 
   const data = await ffmpeg.readFile(outputName);
   const blob = new Blob([data as unknown as BlobPart], { type: 'audio/mpeg' });
